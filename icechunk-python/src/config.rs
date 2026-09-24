@@ -25,7 +25,7 @@ use icechunk::{
         ManifestSplitDimCondition, ManifestSplittingConfig,
         ManifestVirtualChunkLocationCompressionConfig, RepoUpdateRetryConfig,
         S3ChecksumAlgorithm, S3Credentials, S3CredentialsFetcher, S3Options,
-        S3RemoteSigningConfig, S3StaticCredentials,
+        S3RemoteSigningConfig, S3SignerToken, S3SignerTokenFetcher, S3StaticCredentials,
     },
     storage::{self, ConcurrencySettings},
     virtual_chunks::VirtualChunkContainer,
@@ -270,6 +270,71 @@ impl GcsCredentialsFetcher for PythonCredentialsFetcher<GcsBearerCredential> {
     }
 }
 
+/// Bearer token for a remote S3 request signer, returned by token callables.
+#[pyclass(from_py_object, name = "S3SignerToken")]
+#[derive(Clone, Debug)]
+pub(crate) struct PyS3SignerToken {
+    #[pyo3(get, set)]
+    token: String,
+    #[pyo3(get, set)]
+    expires_after: Option<DateTime<Utc>>,
+}
+
+#[pymethods]
+impl PyS3SignerToken {
+    #[new]
+    #[pyo3(signature = (token, expires_after = None))]
+    pub(crate) fn new(token: String, expires_after: Option<DateTime<Utc>>) -> Self {
+        Self { token, expires_after }
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "icechunk.credentials.S3SignerToken(token=****, expires_after={})",
+            self.expires_after.as_ref().map(datetime_repr).unwrap_or("None".to_string())
+        )
+    }
+}
+
+/// What a Python token callable may return: a plain string (no expiry) or a token.
+#[derive(FromPyObject)]
+enum PySignerTokenResult {
+    Token(PyS3SignerToken),
+    Plain(String),
+}
+
+impl From<PySignerTokenResult> for S3SignerToken {
+    fn from(value: PySignerTokenResult) -> Self {
+        match value {
+            PySignerTokenResult::Token(t) => {
+                S3SignerToken { token: t.token, expires_after: t.expires_after }
+            }
+            PySignerTokenResult::Plain(token) => {
+                S3SignerToken { token, expires_after: None }
+            }
+        }
+    }
+}
+
+/// Calls a pickled Python function to get a signer token. Caching and refresh on
+/// expiration are done by the signing client, not here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PythonSignerTokenFetcher {
+    pickled_function: Vec<u8>,
+}
+
+#[async_trait]
+#[typetag::serde]
+impl S3SignerTokenFetcher for PythonSignerTokenFetcher {
+    async fn get(&self) -> Result<S3SignerToken, String> {
+        Python::attach(|py| {
+            call_pickled::<PySignerTokenResult>(py, self.pickled_function.clone())
+                .map(|t| t.into())
+        })
+        .map_err(|e: PyErr| e.to_string())
+    }
+}
+
 #[pyclass(from_py_object, name = "S3Credentials")]
 #[derive(Clone, Debug)]
 pub enum PyS3Credentials {
@@ -280,11 +345,12 @@ pub enum PyS3Credentials {
         pickled_function: Vec<u8>,
         current: Option<PyS3StaticCredentials>,
     },
-    #[pyo3(constructor = (signer_url, token = None, headers = None))]
+    #[pyo3(constructor = (signer_url, token = None, headers = None, pickled_token_function = None))]
     RemoteSigning {
         signer_url: String,
         token: Option<String>,
         headers: Option<HashMap<String, String>>,
+        pickled_token_function: Option<Vec<u8>>,
     },
 }
 
@@ -303,10 +369,20 @@ impl From<PyS3Credentials> for S3Credentials {
 
                 S3Credentials::Refreshable(Arc::new(fetcher))
             }
-            PyS3Credentials::RemoteSigning { signer_url, token, headers } => {
+            PyS3Credentials::RemoteSigning {
+                signer_url,
+                token,
+                headers,
+                pickled_token_function,
+            } => {
+                let token_fetcher = pickled_token_function.map(|pickled_function| {
+                    Arc::new(PythonSignerTokenFetcher { pickled_function })
+                        as Arc<dyn S3SignerTokenFetcher>
+                });
                 S3Credentials::RemoteSigning(S3RemoteSigningConfig {
                     signer_url,
                     token,
+                    token_fetcher,
                     headers: headers.unwrap_or_default().into_iter().collect(),
                 })
             }

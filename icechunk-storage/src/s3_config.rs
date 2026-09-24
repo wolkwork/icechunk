@@ -186,13 +186,49 @@ pub trait S3CredentialsFetcher: fmt::Debug + Sync + Send {
 /// protocol (as served by e.g. Lakekeeper or Polaris): for every request the client
 /// `POST`s `{region, uri, method, headers, body?}` to `signer_url` and receives back
 /// `{uri, headers}` containing a `SigV4` signature, which it then sends to the object store.
+/// A bearer token for the remote signer.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct S3SignerToken {
+    pub token: String,
+    /// When the token expires. `None` means it's used until the signer rejects it
+    /// with 401/403, after which a new token is fetched.
+    pub expires_after: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for S3SignerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3SignerToken")
+            .field("token", &"<redacted>")
+            .field("expires_after", &self.expires_after)
+            .finish()
+    }
+}
+
+/// Provides (and refreshes) the bearer token sent to the remote signer.
+#[async_trait]
+#[typetag::serde(tag = "s3_signer_token_fetcher_type")]
+pub trait S3SignerTokenFetcher: fmt::Debug + Sync + Send {
+    async fn get(&self) -> Result<S3SignerToken, String>;
+}
+
+/// Delegate request signing to a remote signer service instead of holding S3
+/// credentials locally.
+///
+/// This implements the client side of the Iceberg REST catalog "S3 remote signing"
+/// protocol (as served by e.g. Lakekeeper or Polaris): for every request the client
+/// `POST`s `{region, uri, method, headers, body?}` to `signer_url` and receives back
+/// `{uri, headers}` containing a `SigV4` signature, which it then sends to the object store.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct S3RemoteSigningConfig {
     /// Full URL of the signing endpoint, for example
     /// `https://lakekeeper.example.com/catalog/v1/aws/s3/sign`.
     pub signer_url: String,
-    /// Bearer token sent to the signer in the `Authorization` header.
+    /// Fixed bearer token sent to the signer in the `Authorization` header.
     pub token: Option<String>,
+    /// Fetches the bearer token, refreshing it when it expires or when the signer
+    /// rejects it. Takes precedence over `token`.
+    #[serde(default)]
+    pub token_fetcher: Option<Arc<dyn S3SignerTokenFetcher>>,
     /// Extra headers sent to the signer (not to the object store), for example a
     /// warehouse id.
     #[serde(default)]
@@ -204,6 +240,7 @@ impl fmt::Debug for S3RemoteSigningConfig {
         f.debug_struct("S3RemoteSigningConfig")
             .field("signer_url", &self.signer_url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("token_fetcher", &self.token_fetcher)
             .field("headers", &self.headers.iter().map(|(k, _)| k).collect::<Vec<_>>())
             .finish()
     }

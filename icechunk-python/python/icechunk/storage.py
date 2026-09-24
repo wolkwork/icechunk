@@ -7,6 +7,7 @@ from icechunk._icechunk_python import (
     GcsBearerCredential,
     ObjectStoreConfig,
     S3Options,
+    S3SignerToken,
     S3StaticCredentials,
     Storage,
     StorageConcurrencySettings,
@@ -207,6 +208,7 @@ def s3_storage(
     headers: dict[str, str] | None = None,
     remote_signer_url: str | None = None,
     remote_signer_token: str | None = None,
+    get_remote_signer_token: Callable[[], S3SignerToken | str] | None = None,
     remote_signer_headers: dict[str, str] | None = None,
 ) -> Storage:
     """Create a Storage instance that saves data in S3 or S3 compatible object stores.
@@ -278,7 +280,10 @@ def s3_storage(
         remote signing endpoint (Iceberg REST catalog S3 signer protocol, e.g.
         Lakekeeper). Can't be combined with other credential arguments.
     remote_signer_token: str | None
-        Bearer token sent to the remote signer.
+        Fixed bearer token sent to the remote signer.
+    get_remote_signer_token: Callable[[], S3SignerToken | str] | None
+        Function returning the remote signer token, for tokens that expire. See
+        ``s3_remote_signing_credentials``.
     remote_signer_headers: dict[str, str] | None
         Extra headers sent to the remote signer (not to the object store).
     """
@@ -300,6 +305,7 @@ def s3_storage(
         credentials: AnyS3Credential = s3_remote_signing_credentials(
             signer_url=remote_signer_url,
             token=remote_signer_token,
+            get_token=get_remote_signer_token,
             headers=remote_signer_headers,
         )
     else:

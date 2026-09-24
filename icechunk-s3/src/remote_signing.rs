@@ -38,8 +38,11 @@ use aws_smithy_runtime_api::{
     http::Request,
 };
 use aws_smithy_types::{body::SdkBody, retry::ErrorKind};
-use icechunk_storage::s3_config::S3RemoteSigningConfig;
+use bytes::Bytes;
+use chrono::{TimeDelta, Utc};
+use icechunk_storage::s3_config::{S3RemoteSigningConfig, S3SignerToken};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 /// The SDK doesn't compute a payload hash for unsigned (anonymous) requests, but
 /// `SigV4` needs one. We don't send the body to the signer, so we use the S3
@@ -74,12 +77,50 @@ pub(crate) fn default_http_client() -> Option<SharedHttpClient> {
         .http_client()
 }
 
+/// How long before expiration a fetched token is considered stale.
+const TOKEN_EXPIRY_BUFFER: TimeDelta = TimeDelta::seconds(60);
+
+/// State shared by all connectors of one S3 client.
+#[derive(Debug)]
+struct Signer {
+    config: S3RemoteSigningConfig,
+    region: String,
+    /// Last token returned by `config.token_fetcher`. The async mutex makes
+    /// concurrent requests wait for a single refresh.
+    cached_token: Mutex<Option<S3SignerToken>>,
+}
+
+impl Signer {
+    /// The bearer token to use, fetching a new one if needed. `stale` is a token
+    /// the signer just rejected.
+    async fn token(&self, stale: Option<&str>) -> Result<Option<String>, ConnectorError> {
+        let Some(fetcher) = &self.config.token_fetcher else {
+            return Ok(self.config.token.clone());
+        };
+        let mut cached = self.cached_token.lock().await;
+        let usable = cached.as_ref().is_some_and(|t| {
+            Some(t.token.as_str()) != stale
+                && t.expires_after
+                    .is_none_or(|exp| exp > Utc::now() + TOKEN_EXPIRY_BUFFER)
+        });
+        if !usable {
+            let token = fetcher.get().await.map_err(|e| {
+                ConnectorError::other(
+                    format!("cannot fetch remote signer token: {e}").into(),
+                    None,
+                )
+            })?;
+            *cached = Some(token);
+        }
+        Ok(cached.as_ref().map(|t| t.token.clone()))
+    }
+}
+
 /// Wraps the SDK's default [`HttpClient`] so that every request is remotely signed.
 #[derive(Debug)]
 pub(crate) struct RemoteSigningHttpClient {
     inner: SharedHttpClient,
-    config: Arc<S3RemoteSigningConfig>,
-    region: Arc<str>,
+    signer: Arc<Signer>,
 }
 
 impl RemoteSigningHttpClient {
@@ -88,7 +129,8 @@ impl RemoteSigningHttpClient {
         config: S3RemoteSigningConfig,
         region: String,
     ) -> Self {
-        Self { inner, config: Arc::new(config), region: region.into() }
+        let signer = Signer { config, region, cached_token: Mutex::new(None) };
+        Self { inner, signer: Arc::new(signer) }
     }
 }
 
@@ -100,8 +142,7 @@ impl HttpClient for RemoteSigningHttpClient {
     ) -> SharedHttpConnector {
         SharedHttpConnector::new(RemoteSigningConnector {
             inner: self.inner.http_connector(settings, components),
-            config: Arc::clone(&self.config),
-            region: Arc::clone(&self.region),
+            signer: Arc::clone(&self.signer),
         })
     }
 
@@ -116,17 +157,15 @@ impl HttpClient for RemoteSigningHttpClient {
 #[derive(Debug)]
 struct RemoteSigningConnector {
     inner: SharedHttpConnector,
-    config: Arc<S3RemoteSigningConfig>,
-    region: Arc<str>,
+    signer: Arc<Signer>,
 }
 
 impl HttpConnector for RemoteSigningConnector {
     fn call(&self, mut request: HttpRequest) -> HttpConnectorFuture {
         let inner = self.inner.clone();
-        let config = Arc::clone(&self.config);
-        let region = Arc::clone(&self.region);
+        let signer = Arc::clone(&self.signer);
         HttpConnectorFuture::new(async move {
-            sign_request(&inner, &config, &region, &mut request).await?;
+            sign_request(&inner, &signer, &mut request).await?;
             inner.call(request).await
         })
     }
@@ -134,8 +173,7 @@ impl HttpConnector for RemoteSigningConnector {
 
 async fn sign_request(
     connector: &SharedHttpConnector,
-    config: &S3RemoteSigningConfig,
-    region: &str,
+    signer: &Signer,
     request: &mut HttpRequest,
 ) -> Result<(), ConnectorError> {
     if !request.headers().contains_key(CONTENT_SHA256_HEADER) {
@@ -156,44 +194,32 @@ async fn sign_request(
         None
     };
 
-    let payload = serde_json::to_vec(&SignRequest {
-        region,
-        uri: request.uri(),
-        method: request.method(),
-        headers,
-        body,
-    })
-    .map_err(|e| ConnectorError::other(e.into(), None))?;
+    let payload = Bytes::from(
+        serde_json::to_vec(&SignRequest {
+            region: &signer.region,
+            uri: request.uri(),
+            method: request.method(),
+            headers,
+            body,
+        })
+        .map_err(|e| ConnectorError::other(e.into(), None))?,
+    );
 
-    let mut sign_req = Request::new(SdkBody::from(payload));
-    sign_req.set_method("POST").map_err(|e| ConnectorError::other(e.into(), None))?;
-    sign_req
-        .set_uri(config.signer_url.as_str())
-        .map_err(|e| ConnectorError::other(e.into(), None))?;
-    let sign_headers = sign_req.headers_mut();
-    sign_headers.insert("content-type", "application/json");
-    sign_headers.insert("accept", "application/json");
-    if let Some(token) = &config.token {
-        sign_headers.insert("authorization", format!("Bearer {token}"));
-    }
-    for (name, value) in &config.headers {
-        sign_headers.insert(name.clone(), value.clone());
+    let token = signer.token(None).await?;
+    let (mut status, mut body) =
+        call_signer(connector, &signer.config, token.as_deref(), payload.clone()).await?;
+    // A rejected token that came from a fetcher may have been revoked or expired
+    // early: fetch a new one and try once more.
+    if matches!(status, 401 | 403) && signer.config.token_fetcher.is_some() {
+        let fresh = signer.token(token.as_deref()).await?;
+        (status, body) =
+            call_signer(connector, &signer.config, fresh.as_deref(), payload).await?;
     }
 
-    let response = connector.call(sign_req).await?;
-    let status = response.status();
-    let body = ByteStream::new(response.into_body())
-        .collect()
-        .await
-        .map_err(|e| ConnectorError::io(e.into()))?
-        .into_bytes();
-
-    if !status.is_success() {
-        let kind = (status.as_u16() >= 500 || status.as_u16() == 429)
-            .then_some(ErrorKind::TransientError);
+    if !(200..300).contains(&status) {
+        let kind = (status >= 500 || status == 429).then_some(ErrorKind::TransientError);
         let msg = format!(
-            "remote signer returned HTTP {}: {}",
-            status.as_u16(),
+            "remote signer returned HTTP {status}: {}",
             String::from_utf8_lossy(&body)
         );
         return Err(ConnectorError::other(msg.into(), kind));
@@ -214,4 +240,36 @@ async fn sign_request(
         }
     }
     Ok(())
+}
+
+/// Sends one signing request, returning the HTTP status and response body.
+async fn call_signer(
+    connector: &SharedHttpConnector,
+    config: &S3RemoteSigningConfig,
+    token: Option<&str>,
+    payload: Bytes,
+) -> Result<(u16, Bytes), ConnectorError> {
+    let mut sign_req = Request::new(SdkBody::from(payload));
+    sign_req.set_method("POST").map_err(|e| ConnectorError::other(e.into(), None))?;
+    sign_req
+        .set_uri(config.signer_url.as_str())
+        .map_err(|e| ConnectorError::other(e.into(), None))?;
+    let sign_headers = sign_req.headers_mut();
+    sign_headers.insert("content-type", "application/json");
+    sign_headers.insert("accept", "application/json");
+    if let Some(token) = token {
+        sign_headers.insert("authorization", format!("Bearer {token}"));
+    }
+    for (name, value) in &config.headers {
+        sign_headers.insert(name.clone(), value.clone());
+    }
+
+    let response = connector.call(sign_req).await?;
+    let status = response.status().as_u16();
+    let body = ByteStream::new(response.into_body())
+        .collect()
+        .await
+        .map_err(|e| ConnectorError::io(e.into()))?
+        .into_bytes();
+    Ok((status, body))
 }

@@ -23,9 +23,9 @@ use config::{
     PyLatencyStorage, PyManifestConfig, PyManifestPreloadCondition,
     PyManifestPreloadConfig, PyManifestVirtualChunkLocationCompressionConfig,
     PyObjectStoreConfig, PyRepoUpdateRetryConfig, PyRepositoryConfig, PyS3Credentials,
-    PyS3Options, PyS3StaticCredentials, PyStorage, PyStorageConcurrencySettings,
-    PyStorageObjectInfo, PyStorageRetriesSettings, PyStorageSettings,
-    PyStorageTimeoutSettings, PyVirtualChunkContainer,
+    PyS3Options, PyS3SignerToken, PyS3StaticCredentials, PyStorage,
+    PyStorageConcurrencySettings, PyStorageObjectInfo, PyStorageRetriesSettings,
+    PyStorageSettings, PyStorageTimeoutSettings, PyVirtualChunkContainer,
 };
 use config::{
     PyManifestSplitCondition, PyManifestSplitDimCondition, PyManifestSplittingConfig,
@@ -213,6 +213,7 @@ fn _icechunk_python(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConflictDetector>()?;
     m.add_class::<PyVersionSelection>()?;
     m.add_class::<PyS3StaticCredentials>()?;
+    m.add_class::<PyS3SignerToken>()?;
     m.add_class::<PyS3Credentials>()?;
     m.add_class::<PyGcsCredentials>()?;
     m.add_class::<PyGcsBearerCredential>()?;

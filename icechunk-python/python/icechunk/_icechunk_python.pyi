@@ -2880,6 +2880,23 @@ class S3StaticCredentials:
             Optional, the expiration time of the credentials.
         """
 
+class S3SignerToken:
+    """Bearer token for a remote S3 request signer.
+
+    Attributes:
+        token: str
+            The bearer token.
+        expires_after: datetime | None
+            When the token expires. If None, it's used until the signer rejects it.
+    """
+
+    token: str
+    expires_after: datetime.datetime | None
+
+    def __init__(
+        self, token: str, expires_after: datetime.datetime | None = None
+    ) -> None: ...
+
 class S3Credentials:
     """Credentials for an S3 storage backend"""
     class FromEnv:
@@ -2931,6 +2948,7 @@ class S3Credentials:
             signer_url: str,
             token: str | None = None,
             headers: dict[str, str] | None = None,
+            pickled_token_function: bytes | None = None,
         ) -> S3Credentials.RemoteSigning:
             """Create remote signing S3 credentials.
 
@@ -2942,6 +2960,9 @@ class S3Credentials:
                 Bearer token sent to the signer.
             headers: dict[str, str] | None
                 Extra headers sent to the signer (not to the object store).
+            pickled_token_function: bytes | None
+                A pickled function returning ``S3SignerToken | str``, used to fetch
+                and refresh the token. Takes precedence over ``token``.
             """
 
 type _AnyS3Credential = (

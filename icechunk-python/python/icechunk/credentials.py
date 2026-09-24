@@ -12,6 +12,7 @@ from icechunk._icechunk_python import (
     GcsCredentials,
     GcsStaticCredentials,
     S3Credentials,
+    S3SignerToken,
     S3StaticCredentials,
 )
 
@@ -32,6 +33,7 @@ __all__ = [
     "HttpAccess",
     "LocalFileSystemAccess",
     "S3Credentials",
+    "S3SignerToken",
     "S3StaticCredentials",
     "azure_anonymous_credentials",
     "azure_credentials",
@@ -132,6 +134,7 @@ def s3_remote_signing_credentials(
     *,
     signer_url: str,
     token: str | None = None,
+    get_token: Callable[[], S3SignerToken | str] | None = None,
     headers: dict[str, str] | None = None,
 ) -> S3Credentials.RemoteSigning:
     """Create credentials that delegate request signing to a remote signer.
@@ -146,11 +149,20 @@ def s3_remote_signing_credentials(
     signer_url: str
         Full URL of the signing endpoint.
     token: str | None
-        Bearer token sent to the signer in the ``Authorization`` header.
+        Fixed bearer token sent to the signer in the ``Authorization`` header.
+    get_token: Callable[[], S3SignerToken | str] | None
+        Function returning the bearer token, for tokens that expire. It must be
+        pickleable. It's called on first use, again shortly before the returned
+        ``S3SignerToken.expires_after``, and whenever the signer rejects the token
+        with 401/403. A plain ``str`` return value is treated as never expiring.
+        Can't be combined with ``token``.
     headers: dict[str, str] | None
         Extra headers sent to the signer (not to the object store).
     """
-    return S3Credentials.RemoteSigning(signer_url, token, headers)
+    if token is not None and get_token is not None:
+        raise ValueError("pass either token or get_token, not both")
+    pickled = pickle.dumps(get_token) if get_token is not None else None
+    return S3Credentials.RemoteSigning(signer_url, token, headers, pickled)
 
 
 def s3_static_credentials(
