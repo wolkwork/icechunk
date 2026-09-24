@@ -2438,6 +2438,8 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "aws-smithy-types-convert",
  "bytes",
  "chrono",

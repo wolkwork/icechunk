@@ -86,6 +86,7 @@ from icechunk.credentials import (
     s3_credentials,
     s3_from_env_credentials,
     s3_refreshable_credentials,
+    s3_remote_signing_credentials,
     s3_static_credentials,
 )
 from icechunk.ops import GCSummary, Update, UpdateType
@@ -234,6 +235,7 @@ __all__ = [
     "s3_credentials",
     "s3_from_env_credentials",
     "s3_refreshable_credentials",
+    "s3_remote_signing_credentials",
     "s3_static_credentials",
     "s3_storage",
     "s3_store",

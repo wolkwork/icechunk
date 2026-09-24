@@ -41,7 +41,7 @@ use futures::{
 };
 pub use icechunk_storage::s3_config::{
     S3ChecksumAlgorithm, S3Credentials, S3CredentialsFetcher, S3Options,
-    S3StaticCredentials,
+    S3RemoteSigningConfig, S3StaticCredentials,
 };
 use icechunk_storage::{
     DeleteObjectsResult, GetModifiedResult, ListInfo, RepositoryCreation, Settings,
@@ -61,6 +61,8 @@ use tokio_util::io::StreamReader;
 use tracing::{error, instrument, trace, warn};
 use typed_path::Utf8UnixPath;
 use uuid::Uuid;
+
+mod remote_signing;
 
 /// How object keys are laid out inside the bucket for a given repository.
 ///
@@ -268,6 +270,7 @@ pub async fn mk_client(
     };
     aws_config = aws_config.stalled_stream_protection(stalled_stream);
 
+    let mut remote_signing = None;
     match credentials {
         S3Credentials::FromEnv => {}
         S3Credentials::Anonymous => aws_config = aws_config.no_credentials(),
@@ -284,6 +287,12 @@ pub async fn mk_client(
         S3Credentials::Refreshable(fetcher) => {
             aws_config =
                 aws_config.credentials_provider(ProvideRefreshableCredentials(fetcher));
+        }
+        S3Credentials::RemoteSigning(signing_config) => {
+            // The SDK sends unsigned requests; our HTTP client wrapper gets them
+            // signed by the remote signer just before transmission.
+            aws_config = aws_config.no_credentials();
+            remote_signing = Some(signing_config);
         }
     }
 
@@ -317,9 +326,25 @@ pub async fn mk_client(
         aws_config = aws_config.timeout_config(timeout_builder.build());
     }
 
-    let mut s3_builder = Builder::from(&aws_config.load().await)
+    let sdk_config = aws_config.load().await;
+    let mut s3_builder = Builder::from(&sdk_config)
         .force_path_style(config.force_path_style)
         .retry_config(retry_config);
+
+    if let Some(signing_config) = remote_signing {
+        // `SdkConfig` doesn't carry the default HTTP client (it's installed later,
+        // when the S3 client is built), so we get the same default and wrap it.
+        #[expect(clippy::expect_used)]
+        let inner = remote_signing::default_http_client()
+            .expect("default HTTPS client should be available");
+        let region = sdk_config
+            .region()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "us-east-1".to_string());
+        s3_builder = s3_builder.http_client(
+            remote_signing::RemoteSigningHttpClient::new(inner, signing_config, region),
+        );
+    }
 
     // credentials may take a while to refresh, defaults are too strict
     let id_cache = IdentityCache::lazy()

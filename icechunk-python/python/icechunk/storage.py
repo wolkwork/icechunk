@@ -15,9 +15,11 @@ from icechunk._icechunk_python import (
     StorageTimeoutSettings,
 )
 from icechunk.credentials import (
+    AnyS3Credential,
     azure_credentials,
     gcs_credentials,
     s3_credentials,
+    s3_remote_signing_credentials,
 )
 
 __all__ = [
@@ -203,6 +205,9 @@ def s3_storage(
     read_headers: dict[str, str] | None = None,
     write_headers: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
+    remote_signer_url: str | None = None,
+    remote_signer_token: str | None = None,
+    remote_signer_headers: dict[str, str] | None = None,
 ) -> Storage:
     """Create a Storage instance that saves data in S3 or S3 compatible object stores.
 
@@ -268,18 +273,46 @@ def s3_storage(
         Extra HTTP headers to attach to both read and write requests. They are
         merged with ``read_headers``/``write_headers``, which take precedence per
         role on a key conflict.
+    remote_signer_url: str | None
+        If set, no S3 credentials are used; instead every request is signed by this
+        remote signing endpoint (Iceberg REST catalog S3 signer protocol, e.g.
+        Lakekeeper). Can't be combined with other credential arguments.
+    remote_signer_token: str | None
+        Bearer token sent to the remote signer.
+    remote_signer_headers: dict[str, str] | None
+        Extra headers sent to the remote signer (not to the object store).
     """
 
-    credentials = s3_credentials(
-        access_key_id=access_key_id,
-        secret_access_key=secret_access_key,
-        session_token=session_token,
-        expires_after=expires_after,
-        anonymous=anonymous,
-        from_env=from_env,
-        get_credentials=get_credentials,
-        scatter_initial_credentials=scatter_initial_credentials,
-    )
+    if remote_signer_url is not None:
+        if any(
+            x is not None
+            for x in (
+                access_key_id,
+                secret_access_key,
+                session_token,
+                expires_after,
+                get_credentials,
+            )
+        ) or (anonymous or from_env):
+            raise ValueError(
+                "remote_signer_url can't be combined with other credential arguments"
+            )
+        credentials: AnyS3Credential = s3_remote_signing_credentials(
+            signer_url=remote_signer_url,
+            token=remote_signer_token,
+            headers=remote_signer_headers,
+        )
+    else:
+        credentials = s3_credentials(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            session_token=session_token,
+            expires_after=expires_after,
+            anonymous=anonymous,
+            from_env=from_env,
+            get_credentials=get_credentials,
+            scatter_initial_credentials=scatter_initial_credentials,
+        )
     options = S3Options(
         region=region,
         endpoint_url=endpoint_url,

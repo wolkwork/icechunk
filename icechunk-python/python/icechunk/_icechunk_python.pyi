@@ -2920,11 +2920,36 @@ class S3Credentials:
                 are requested and then deleted.
             """
 
+    class RemoteSigning:
+        """Holds no S3 credentials: every request is signed by a remote signer.
+
+        Implements the client side of the Iceberg REST catalog S3 remote signing
+        protocol, as served by catalogs like Lakekeeper.
+        """
+        def __new__(
+            cls,
+            signer_url: str,
+            token: str | None = None,
+            headers: dict[str, str] | None = None,
+        ) -> S3Credentials.RemoteSigning:
+            """Create remote signing S3 credentials.
+
+            Parameters
+            ----------
+            signer_url: str
+                Full URL of the signing endpoint.
+            token: str | None
+                Bearer token sent to the signer.
+            headers: dict[str, str] | None
+                Extra headers sent to the signer (not to the object store).
+            """
+
 type _AnyS3Credential = (
     S3Credentials.Static
     | S3Credentials.Anonymous
     | S3Credentials.FromEnv
     | S3Credentials.Refreshable
+    | S3Credentials.RemoteSigning
 )
 
 class GcsBearerCredential:

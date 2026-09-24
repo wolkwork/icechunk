@@ -25,7 +25,7 @@ use icechunk::{
         ManifestSplitDimCondition, ManifestSplittingConfig,
         ManifestVirtualChunkLocationCompressionConfig, RepoUpdateRetryConfig,
         S3ChecksumAlgorithm, S3Credentials, S3CredentialsFetcher, S3Options,
-        S3StaticCredentials,
+        S3RemoteSigningConfig, S3StaticCredentials,
     },
     storage::{self, ConcurrencySettings},
     virtual_chunks::VirtualChunkContainer,
@@ -276,7 +276,16 @@ pub enum PyS3Credentials {
     FromEnv(),
     Anonymous(),
     Static(PyS3StaticCredentials),
-    Refreshable { pickled_function: Vec<u8>, current: Option<PyS3StaticCredentials> },
+    Refreshable {
+        pickled_function: Vec<u8>,
+        current: Option<PyS3StaticCredentials>,
+    },
+    #[pyo3(constructor = (signer_url, token = None, headers = None))]
+    RemoteSigning {
+        signer_url: String,
+        token: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    },
 }
 
 impl From<PyS3Credentials> for S3Credentials {
@@ -293,6 +302,13 @@ impl From<PyS3Credentials> for S3Credentials {
                 };
 
                 S3Credentials::Refreshable(Arc::new(fetcher))
+            }
+            PyS3Credentials::RemoteSigning { signer_url, token, headers } => {
+                S3Credentials::RemoteSigning(S3RemoteSigningConfig {
+                    signer_url,
+                    token,
+                    headers: headers.unwrap_or_default().into_iter().collect(),
+                })
             }
         }
     }

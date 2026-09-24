@@ -25,7 +25,7 @@ use crate::{
 // consumers (`crate::config::S3Options`, etc.) continue to work.
 pub use crate::storage::s3_config::{
     S3ChecksumAlgorithm, S3Credentials, S3CredentialsFetcher, S3Options,
-    S3StaticCredentials,
+    S3RemoteSigningConfig, S3StaticCredentials,
 };
 #[cfg(feature = "object-store-azure")]
 pub use crate::storage::{

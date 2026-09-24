@@ -48,6 +48,7 @@ __all__ = [
     "s3_credentials",
     "s3_from_env_credentials",
     "s3_refreshable_credentials",
+    "s3_remote_signing_credentials",
     "s3_static_credentials",
 ]
 
@@ -56,6 +57,7 @@ AnyS3Credential = (
     | S3Credentials.Anonymous
     | S3Credentials.FromEnv
     | S3Credentials.Refreshable
+    | S3Credentials.RemoteSigning
 )
 
 AnyGcsStaticCredential = (
@@ -124,6 +126,31 @@ def s3_refreshable_credentials(
     """
     current = get_credentials() if scatter_initial_credentials else None
     return S3Credentials.Refreshable(pickle.dumps(get_credentials), current)
+
+
+def s3_remote_signing_credentials(
+    *,
+    signer_url: str,
+    token: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> S3Credentials.RemoteSigning:
+    """Create credentials that delegate request signing to a remote signer.
+
+    The client holds no S3 credentials. Before each request is sent to the object
+    store, it is sent (method, URI, headers) to ``signer_url``, which returns the
+    signed headers. This is the Iceberg REST catalog S3 remote signing protocol,
+    as served by catalogs like Lakekeeper.
+
+    Parameters
+    ----------
+    signer_url: str
+        Full URL of the signing endpoint.
+    token: str | None
+        Bearer token sent to the signer in the ``Authorization`` header.
+    headers: dict[str, str] | None
+        Extra headers sent to the signer (not to the object store).
+    """
+    return S3Credentials.RemoteSigning(signer_url, token, headers)
 
 
 def s3_static_credentials(

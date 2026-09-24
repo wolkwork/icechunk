@@ -179,6 +179,36 @@ pub trait S3CredentialsFetcher: fmt::Debug + Sync + Send {
     async fn get(&self) -> Result<S3StaticCredentials, String>;
 }
 
+/// Delegate request signing to a remote signer service instead of holding S3
+/// credentials locally.
+///
+/// This implements the client side of the Iceberg REST catalog "S3 remote signing"
+/// protocol (as served by e.g. Lakekeeper or Polaris): for every request the client
+/// `POST`s `{region, uri, method, headers, body?}` to `signer_url` and receives back
+/// `{uri, headers}` containing a `SigV4` signature, which it then sends to the object store.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct S3RemoteSigningConfig {
+    /// Full URL of the signing endpoint, for example
+    /// `https://lakekeeper.example.com/catalog/v1/aws/s3/sign`.
+    pub signer_url: String,
+    /// Bearer token sent to the signer in the `Authorization` header.
+    pub token: Option<String>,
+    /// Extra headers sent to the signer (not to the object store), for example a
+    /// warehouse id.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for S3RemoteSigningConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3RemoteSigningConfig")
+            .field("signer_url", &self.signer_url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("headers", &self.headers.iter().map(|(k, _)| k).collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// S3 authentication credentials.
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(tag = "s3_credential_type")]
@@ -189,4 +219,6 @@ pub enum S3Credentials {
     Anonymous,
     Static(S3StaticCredentials),
     Refreshable(Arc<dyn S3CredentialsFetcher>),
+    /// No local credentials: every request is signed by a remote service.
+    RemoteSigning(S3RemoteSigningConfig),
 }
